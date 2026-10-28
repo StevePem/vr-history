@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang='en'>
+  <head>
+    <meta charset='UTF-8'>
+    <title>VR History</title>
+    
+    <!--
+    ** See https://www.w3schools.com/js/js_date_formats.asp: dates for javascript should preferably
+    be MM/DD/YYYY, not YYYY/MM/DD (as in rail_lines.geojson) - but seems to work
+    ** Data.  Some edits made from video version: deleted 'flash' fields, and tidied up some lines (eg Forrest, Beech Forest).  Continue doing so when errors noted as against OSM paths. May need to clear Chrome cache after editing. 
+    ** flip (for the undo button) might not work on phone, according to https://www.w3schools.com/howto/howto_css_flip_image.asp 
+    ** Firefox problems: when you restart, it remembers the last-used slider date and basemap (and doesn't re-set the basemap selector)
+    I had fixed this in an earlier project (maybe Trees?)
+    -->
+
+    <link rel='stylesheet' href='src/leaflet.css'>
+    <link rel='stylesheet' href='src/css/bootstrap.css'>
+    <link rel='stylesheet' href='src/plugins/leaflet-control-condended-attribution.css'>
+    <link rel='stylesheet' href='src/plugins/easy-button.css'>
+    <link rel="stylesheet" href="src/jquery-ui.min.css"> 
+
+    
+    <script src='src/leaflet.js'></script>
+    <script src='src/jquery-3.2.1.min.js'></script>
+    <script src='src/plugins/leaflet.ajax.min.js'></script>
+    <script src='src/plugins/leaflet-control-condended-attribution.js'></script>
+    <script src='src/plugins/easy-button.js'></script>
+    <script src="src/jquery-ui.min.js"></script> <!--change ui-front z-index from 100 to 2001, so autocomplete displays above sidebar (which is 2000)-->
+    
+    <style>
+      #mapdiv {
+        height: 100vh; /* 100% of viewport height */
+      }
+      
+      .flip {  /* to allow the glyph used on the Undo button to be reversed */
+        transform: scaleX(-1);
+      }
+      
+      .stationNameClass { /* to change standard tooltip appearance for station names */
+        color: blue;
+        font-weight: bold;
+        font-size: 120%;
+        background: transparent;
+        border: none;
+        box-shadow: none;
+        margin: 0px;
+      }
+      .leaflet-tooltip-left.stationNameClass::before {
+        border-left-color: transparent;
+      }
+      .leaflet-tooltip-right.stationNameClass::before {
+        border-right-color: transparent;
+      }
+      /* https://gis.stackexchange.com/questions/212820/overriding-leaflet-tooltip-style
+      https://stackoverflow.com/questions/12606141/how-would-i-customise-the-look-and-feel-of-the-leaflet-popup */
+    </style>
+
+  </head>
+
+  <body>
+    <div id='sidebar' class='col-sm-2'>
+      <h2>Victoria's Railways<br>1854-2020</h2>
+      <hr>
+      
+      <h4>Choose date</h4>
+      <input type='range' id='sldDate' step='86400000' max='1609333200000' min='-3639636000000' value='-3639636000000'>
+      <p>Date: <span id='date-shown'>September 1854</span></p>
+      <button id='btnAnimate' class='btn btn-primary btn-block'>Animate</button>
+      <hr>
+      
+<!--      <div class='form-group'>-->
+      <h4>Change basemap</h4>
+      <select id='selBasemap' class='form-control'>
+        <option value='lyrOSM'>OpenStreetMap</option>
+        <option value='lyrDark'>Dark Background</option>
+        <option value='lyrTerrain'>Terrain</option>
+        <option value='lyrSatellite'>Satellite</option>
+        <option value='lyrSpinalMap'>This is Spinal Map</option>
+      </select>
+<!--      </div>-->
+      <hr>
+      
+      <div class='form-group'>
+      <h4>Find stations</h4>
+      <input type='text' id='txtFindStation' class=form-control placeholder='Station name'>
+      <div class='col-xs-9' style='padding: 5px 3px 5px 0px'>
+        <button id='btnShowStation' class='btn btn-primary btn-block btn-sm' disabled>Show station</button>
+      </div>
+      <div class='col-xs-3' style='padding: 5px 0px 5px 3px'>
+        <button id='btnUndoStation' class='btn btn-primary btn-block btn-sm' disabled><span class='glyphicon glyphicon-share-alt flip'></span></button>
+      </div>
+      <button id='btnAllStations' class='btn btn-primary btn-block btn-sm'>Show all stations</button>
+      <button id='btnClearStations' class='btn btn-primary btn-block btn-sm' disabled>Clear all stations</button>
+      </div>
+    </div>
+    <div id='mapdiv' class='col-sm-10'></div>
+    
+    <script>
+      var mymap;
+      var basemap;
+      var lyrOSM;
+      var lyrDark;
+      var lyrTerrain;
+      var lyrSatellite;
+      var lyrSpinalMap;
+      var lyrRail;
+      var lyrCurrentRail; 
+      var lyrStations;
+      var lyrShownStations;
+      var arAllRailLayers = [];
+      var arDateRailLayers = [];
+      var arAllStationLayers = [];
+      var arAllStationNames = [];
+      var arShownStations = [];
+      var arTempShownStations = [];
+      var flgAllSelected = false;
+      var intAnimating;
+      var ctlHomeButton;
+      var ctlTimeSlider;
+      var ctlZoom;
+      var monthConverter = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+      
+      $(document).ready(function() {
+        
+        //**** Map initialisation ***********
+        
+        mymap = L.map('mapdiv', {
+          center: [-37, 144],
+          zoom: 12,
+          zoomControl: false
+        });
+        
+        ctlZoom = L.control.zoom({
+          position: 'topright'
+        })
+          .addTo(mymap);
+        
+        ctlHomeButton = L.easyButton('glyphicon-home', function() {
+          mymap.fitBounds(lyrRail.getBounds());
+        }, {position: 'topright'})
+          .addTo(mymap);
+
+        //**** Layer initialisation *********
+        
+        lyrRail = L.geoJSON.ajax('data/rail_lines.geojson', {
+          attribution: "Rail locations <a href='https://www.data.vic.gov.au/' target='_blank'>State Government of Victoria</a> under <a href='http://creativecommons.org/licenses/by/4.0' target='_blank'>CC BY 4.0</a>, Opening/closing dates <a href='http://www.victorianrailways.net/vr%20history/history.html' target='_blank'>Mark Bau's VR Website</a>",
+          weight: 0
+        })
+          .addTo(mymap)
+          .on('data:loaded', function() {
+            arAllRailLayers = lyrRail.getLayers();
+            mymap.fitBounds(lyrRail.getBounds());
+          });
+        
+        lyrStations = L.geoJSON.ajax('data/stations.geojson', {
+          pointToLayer: function(point, latlng) {
+            arAllStationNames.push(point.properties.NAME);
+            return L.marker(latlng); // markers aren't shown, but apparently needed for layer to load
+         }
+        })
+//          .addTo(mymap)
+          .on('data:loaded', function() {
+            arAllStationLayers = lyrStations.getLayers();
+            arAllStationNames.sort();
+            $('#txtFindStation').autocomplete({
+              source: arAllStationNames
+            });
+          });
+        
+        lyrOSM = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: 'Map &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>',
+          maxZoom: 19,
+	    });
+
+        // CARTO basemaps require a (free) API key - see https://carto.com/basemaps/apikey/
+        lyrDark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png?key={apikey}', {
+          attribution: 'Map &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions" target="_blank">CARTO</a>',
+          subdomains: 'abcd',
+          apikey: 'cb1_4wf2_1_a3093b8a7dfe2b74e5caddec',
+          maxZoom: 19
+        });
+
+        // Stamen tiles moved to Stadia Maps in 2023; uses Stadia domain authentication (stevepem.github.io and stevepemberton.com.au), so no key needed
+        lyrTerrain = L.tileLayer('https://tiles.stadiamaps.com/tiles/stamen_terrain_background/{z}/{x}/{y}{r}.png', {
+          attribution: 'Map &copy; <a href="https://stadiamaps.com/" target="_blank">Stadia Maps</a> &copy; <a href="https://stamen.com/" target="_blank">Stamen Design</a> &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>',
+          minZoom: 0,
+          maxZoom: 18
+        });
+        
+        lyrSatellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+          attribution: 'Map &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
+        });
+        
+        lyrSpinalMap = L.tileLayer('https://{s}.tile.thunderforest.com/{variant}/{z}/{x}/{y}.png?apikey={apikey}', {
+            attribution: 'Map &copy; <a href="http://www.thunderforest.com/">Thunderforest</a>, <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+            variant: 'spinal-map',
+            apikey: 'b10fba827b0347c5a1fc354abe555ef2',
+            maxZoom: 22
+		});
+        
+        basemap = lyrOSM;
+        mymap.addLayer(basemap);
+        
+        // set animation running on start
+        $('#btnAnimate').click();  
+        
+      });
+      
+      //**** Rail Line Functions ************
+      
+      // update text display to match specified date
+      function updateSlider(date) {
+        $('#date-shown').html(monthConverter[date.getMonth()] + ' ' + date.getFullYear());
+      }
+      
+      // make array of features open at specified date and display as lyrCurrentRail
+      function updateRailLines(date) {
+        arDateRailLayers = [];
+        for (i=0; i<arAllRailLayers.length; i++) {
+          var openDate = Date.parse(arAllRailLayers[i].feature.properties.Open);
+          var closeDate = Date.parse(arAllRailLayers[i].feature.properties.Close_curr);
+          if (date >= openDate && date <= closeDate) {
+            arDateRailLayers.push(arAllRailLayers[i]);
+          }
+        }
+        if (lyrCurrentRail) {
+          lyrCurrentRail.remove();
+        } 
+        if (arDateRailLayers.length > 0) {
+          lyrCurrentRail = L.geoJSON(arDateRailLayers[0].toGeoJSON(), {
+            style: {
+              color: 'red'
+            }
+          })
+          for (i=1; i<arDateRailLayers.length; i++) {
+            lyrCurrentRail.addData(arDateRailLayers[i].toGeoJSON());
+          }
+          lyrCurrentRail
+            .addTo(mymap)
+            .bringToBack(mymap); // to keep behind stations
+        }
+      }
+      
+      // update text display and rail lines when slider moved
+      $('#sldDate').on('change', function() {
+        var date = new Date(Number(this.value));
+        updateSlider(date);
+        updateRailLines(date);
+      });
+      
+      // toggle animation of rail lines
+      $('#btnAnimate').click(function() {
+        if (!intAnimating) {
+          intAnimating = setInterval(function() {
+            $('#sldDate').val(function() {
+              return parseInt(this.value) + 2592000000; // 30 days = 2592000000
+            });
+            var date = new Date(Number($('#sldDate').val()));
+            updateSlider(date);
+            updateRailLines(date);
+            // turn animation off if reach maximum value
+            if ($('#sldDate').val() == $('#sldDate').attr('max')) {
+              $('#btnAnimate').click();
+            }
+          }, 50);
+          $('#btnAnimate').text('Stop Animation');
+        } else {
+          clearInterval(intAnimating);
+          intAnimating = undefined;
+          $('#btnAnimate').text('Animate');
+        }
+      });
+      
+      //**** Basemap Functions ************
+      
+      $('#selBasemap').on('change', function() {
+        var selection = $('#selBasemap').val();
+        mymap.removeLayer(basemap)
+        switch (selection) {          
+          case 'lyrDark':
+            basemap = lyrDark;
+            break;
+          case 'lyrTerrain':
+            basemap = lyrTerrain;
+            break;
+          case 'lyrSatellite':
+            basemap = lyrSatellite;
+            break;
+          case 'lyrSpinalMap':
+            basemap = lyrSpinalMap;
+            break;
+          default:
+            basemap = lyrOSM;
+        }
+        mymap.addLayer(basemap)
+      });
+      
+      //**** Station Functions ************
+      
+      // update station buttons when search text entered
+      $('#txtFindStation').on('keyup paste autocompleteclose', function() {
+        updateStationButtons();
+      });
+      
+      // btnShowStation: add station to shown stations, and update
+      $('#btnShowStation').on('click', function() {
+        var index = undefined; // used to store the array index of the text box station
+        for (i=0; i<arAllStationLayers.length; i++) {
+          // if name found and not already shown, then add to arShownStations
+          if (arAllStationLayers[i].feature.properties.NAME == $('#txtFindStation').val()) { 
+            index = i;
+            if (arShownStations.indexOf(arAllStationLayers[i]) < 0) { 
+              arShownStations.push(arAllStationLayers[i]);
+            }
+          }
+        }
+        updateStations();
+        updateStationButtons();
+        // centre map on the text box station (need to reverse lat long coordinates)
+        if (index) { // if an index was found (that is, if there is a valid station selected, whether last added or not)
+          mymap.panTo([arAllStationLayers[index].feature.geometry.coordinates[1], arAllStationLayers[index].feature.geometry.coordinates[0]]);
+        }
+      });
+      
+      // btnUndo: remove last station and update
+      $('#btnUndoStation').on('click', function() {
+        if (arShownStations.length > 0) {
+          if (flgAllSelected) { // if all stations are shown, clear all but switch temp back in 
+            arShownStations = [];
+            if (arTempShownStations.length > 0) {
+              for (i=0; i<arTempShownStations.length; i++) {
+                arShownStations.push(arTempShownStations[i]);
+              }
+              arTempShownStations = [];
+            }
+            flgAllSelected = false;
+          } else {
+            arShownStations.pop(); // if not all show, remove last
+          }
+        }
+        updateStations();
+        updateStationButtons();
+      })
+      
+      // btnAllStations: save the old shown layer (for undo), add all stations to new, update
+      $('#btnAllStations').on('click', function() {
+        // copy shown stations layer (if any, but not if all) to temp, and clear shown stations
+        if (arShownStations.length > 0 && arShownStations.length < arAllStationLayers.length) {
+          console.log('Shown stations: ', arShownStations.lenth, 'All stations: ', arAllStationLayers.length)
+          arTempShownStations = [];
+          for (i=0; i<arShownStations.length; i++) {
+            arTempShownStations.push(arShownStations[i]);
+          }
+          arShownStations = [];
+        }
+        // add all stations to shown stations layer, if not already there
+        if (arShownStations.length < arAllStationLayers.length) {
+          for (i=0; i<arAllStationLayers.length; i++) {
+            arShownStations.push(arAllStationLayers[i]);
+          }
+        }
+        updateStations();
+        updateStationButtons();
+        mymap.fitBounds(lyrShownStations.getBounds());
+        flgAllSelected = true;
+      }) 
+      
+      // btnClearStations: remove all shown stations
+      $('#btnClearStations').on('click', function() {
+        if (arShownStations.length > 0) {
+          arShownStations = [];
+        }
+        updateStations();
+        updateStationButtons();
+      })
+
+      
+      // display array of selected stations as lyrShownStationsCurrentRail
+      function updateStations() {
+        if (lyrShownStations) {
+          lyrShownStations.remove();
+        } 
+        if (arShownStations.length > 0) {
+          lyrShownStations = L.geoJSON(arShownStations[0].toGeoJSON(), {
+            pointToLayer: function(point, latlng) {
+              return L.circle(latlng, {
+                radius: 15,
+                color: 'blue'
+              });
+            }
+          })
+          for (i=1; i<arShownStations.length; i++) {
+            lyrShownStations.addData(arShownStations[i].toGeoJSON());
+          }
+          // show names, but not if all stations shown
+          if (arShownStations.length < arAllStationNames.length) {
+            lyrShownStations.eachLayer(function(layer) {
+              console.log(layer);
+              layer.bindTooltip(layer.feature.properties.NAME, {
+                permanent: true,
+                interactive: true,
+                className: 'stationNameClass'
+              });
+            });
+          }
+          lyrShownStations.addTo(mymap);
+        }
+      }
+      
+      // test whether station text valid (ie appears in all names array)
+      function testValidName(name) {
+        return (arAllStationNames.indexOf(name) > 0)
+      }
+      
+      // set station buttons
+      function updateStationButtons() {
+        // find station - enabled if valid name showing in text box
+        if (testValidName($('#txtFindStation').val())) { 
+          $('#btnShowStation').attr('disabled', false);
+        } else {
+          $('#btnShowStation').attr('disabled', true);
+        }
+        // undo and clear - enabled if something in 'shown stations' to remove
+        if (arShownStations.length > 0) {
+          $('#btnUndoStation').attr('disabled', false);
+          $('#btnClearStations').attr('disabled', false);
+        } else {
+          $('#btnUndoStation').attr('disabled', true);
+          $('#btnClearStations').attr('disabled', true);
+        }
+        // 
+
+
+      }
+      
+
+      
+        
+      
+      //**** JQuery Event Handlers **********
+
+
+      
+      
+    </script>
+  
+  
+  </body>
+</html>
